@@ -1,0 +1,283 @@
+#include <stdexcept>
+#include <queue>
+#include <esp_sleep.h>
+#include "MyLD2410.h" 
+
+// define RX and TX pins by microcontroller model
+#if defined(ARDUINO_SAMD_NANO_33_IOT) || defined(ARDUINO_AVR_LEONARDO) 
+  // ARDUINO_SAMD_NANO_33_IOT RX_PIN is D1, TX_PIN is D0 
+  // ARDUINO_AVR_LEONARDO RX_PIN(RXI) is D0, TX_PIN(TXO) is D1 
+  #define sensorSerial Serial1 
+#elif defined(ARDUINO_XIAO_ESP32C3) || defined(ARDUINO_XIAO_ESP32C6) 
+  // RX_PIN is D7, TX_PIN is D6 
+  #define sensorSerial Serial0 
+#elif defined(ESP32) 
+  // Other ESP32 device - choose available GPIO pins 
+  #define sensorSerial Serial1 
+  #if defined(ARDUINO_ESP32S3_DEV) 
+    #define RX_PIN 18 
+    #define TX_PIN 17 
+  #else 
+    #define RX_PIN 16 
+    #define TX_PIN 17 
+  #endif 
+#else 
+  #error "This sketch only works on ESP32, Arduino Nano 33IoT, and Arduino Leonardo (Pro-Micro)" 
+#endif
+
+// #define SENSOR_DEBUG 
+#define ENHANCED_MODE 
+#define SERIAL_BAUD_RATE 115200
+
+#ifdef SENSOR_DEBUG
+  MyLD2410 sensor(sensorSerial, true); 
+#else 
+  MyLD2410 sensor(sensorSerial); 
+#endif
+
+#define PIR_PIN GPIO_NUM_14
+#define LED_PIN GPIO_NUM_13
+#define MOSFET_PIN GPIO_NUM_27
+
+#define WAITING 1
+#define WATCHING 2
+
+// currently very high for testing purposes
+#define MOTION_TIMEOUT 400000  // motion timeout threshold (ms)
+
+#define ROOM_EMPTY_TIMEOUT 5000  // room empty timeout (ms)
+
+#define MAX_DATA_POINTS 3  // amount of values stored in motion data queue
+#define MOTION_VAL_THRESHOLD 70  // threshold for average motion value over sample interval
+
+#define LOOP_DEBUG
+
+unsigned long power_on_time;
+unsigned long loop_start_time;
+unsigned long loop_end_time;
+unsigned long dt;
+
+unsigned long room_empty_time;
+unsigned long motion_time;
+unsigned short system_state = WAITING;
+
+std::queue<unsigned char> motion_data;
+
+void init_presence_sensor() {
+  digitalWrite(MOSFET_PIN, HIGH);
+
+  #if defined(ARDUINO_XIAO_ESP32C3) || defined(ARDUINO_XIAO_ESP32C6) || defined(ARDUINO_SAMD_NANO_33_IOT) || defined(ARDUINO_AVR_LEONARDO) 
+    sensorSerial.begin(LD2410_BAUD_RATE); 
+  #else 
+    sensorSerial.begin(LD2410_BAUD_RATE, SERIAL_8N1, RX_PIN, TX_PIN); 
+  #endif
+
+  delay(300);  // give sensor time to wake up
+
+  while (!sensor.begin()) { 
+    Serial.println("Failed to communicate with the sensor."); 
+    delay(1200);
+  }
+
+  #ifdef ENHANCED_MODE 
+    sensor.enhancedMode(); 
+  #else 
+    sensor.enhancedMode(false); 
+  #endif
+}
+
+void setup() {
+  power_on_time = millis();
+
+  Serial.begin(SERIAL_BAUD_RATE);
+
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(MOSFET_PIN, OUTPUT);
+
+  digitalWrite(LED_PIN, LOW);
+
+  Serial.println(__FILE__); 
+
+  init_presence_sensor();
+
+  // TESTING PURPOSES
+  Serial.println("Collecting data in 5...");
+  delay(1000);
+  Serial.println("4");
+  delay(1000);
+  Serial.println("3");
+  delay(1000);
+  Serial.println("2");
+  delay(1000);
+  Serial.println("1");
+  delay(1000);
+
+  loop_start_time = millis();
+}
+
+void loop() {
+  if (system_state == WAITING) {
+    if (digitalRead(PIR_PIN) == 1) {
+      system_state = WATCHING;
+      room_empty_time = 0;
+      motion_time = 0;
+
+      power_on_hp();
+
+      loop_start_time = millis();
+      dt = 0;
+    } else {
+      delay(100);
+    }
+  }
+  
+  if (system_state == WATCHING && room_empty_time > ROOM_EMPTY_TIMEOUT) {
+    system_state = WAITING;
+    power_off_hp();
+    enter_deep_sleep();
+  } else if (system_state == WATCHING) {
+    update_values(dt);
+
+    if (motion_time > MOTION_TIMEOUT) {
+      trigger_emergency();
+    }
+  }
+
+  // HANDLE MANUAL ALERT
+  // NOT YET IMPLEMENTED
+
+  // HANDLE LOOP DEBUG PRINT STATEMENTS
+  #ifdef LOOP_DEBUG
+    Serial.print(millis() - power_on_time);  // time since power-on (ms)
+    Serial.print(" | ");
+
+    switch (system_state) {
+      case WAITING:
+        Serial.print("WAITING");
+        break;
+      case WATCHING:
+        Serial.print("WATCHING");
+        break;
+    }
+
+    Serial.print(" | ");
+    Serial.print(motion_time);
+    Serial.print(" | ");
+    Serial.print(room_empty_time);
+    Serial.print(" | ");
+
+    if (sensor.presenceDetected()) {
+      Serial.print(sensor.detectedDistance());
+    } else {
+      Serial.print("null");
+    }
+    Serial.print(" | ");
+
+    // print instantaneous motion value
+    sensor.presenceDetected() && sensor.movingTargetDetected() 
+      ? Serial.print(sensor.movingTargetSignal())
+      : Serial.print("0");
+    
+    Serial.print(" | ");
+    Serial.println(average_motion_data());
+
+  #endif
+
+  loop_end_time = millis();
+  dt = loop_end_time - loop_start_time;
+  loop_start_time = loop_end_time;
+}
+
+void power_off_hp() {
+  // power off human presence sensor
+  // NOT YET IMPLEMENTED
+  
+  digitalWrite(MOSFET_PIN, LOW);  // Turn off applied voltage
+
+  Serial.print("Human presence 'power off' at ");
+  Serial.print(millis() - power_on_time);
+  Serial.println(" ms.");
+}
+
+void power_on_hp() {
+  // power on human presence sensor
+  digitalWrite(MOSFET_PIN, HIGH); // Apply voltage to the mosfet gate
+
+  delay(100);  // allow LD2410 to wake-up
+
+  init_presence_sensor();
+
+  Serial.print("Human presence 'power on' at ");
+  Serial.print(millis() - power_on_time);
+  Serial.println(" ms.");
+}
+
+void trigger_emergency() {
+  // trigger emergency
+  // NOT YET IMPLEMENTED
+
+  digitalWrite(LED_PIN, HIGH);
+
+  Serial.print("Emergency triggered at ");
+  Serial.print(millis() - power_on_time);
+  Serial.println(" ms.");
+
+  // cancel emergency
+  delay(20000);
+  digitalWrite(LED_PIN, LOW);
+  room_empty_time = 0;
+  motion_time = 0;
+}
+
+void update_values(unsigned long dt) {
+  unsigned char motion_val = 0;
+
+  while (sensor.check() != MyLD2410::Response::DATA) {
+    // no new values to update
+  }
+
+  if (!sensor.presenceDetected()) {
+    room_empty_time += dt;
+  } else if (sensor.presenceDetected() && sensor.movingTargetDetected()) {
+    motion_val = sensor.movingTargetSignal();
+    room_empty_time = 0;
+  } else {
+    motion_val = 0;
+    room_empty_time = 0;
+  }
+
+  if (motion_data.size() >= MAX_DATA_POINTS) {
+    motion_data.pop();
+  }
+  motion_data.push(motion_val);
+
+  if (average_motion_data() > MOTION_VAL_THRESHOLD) {
+    motion_time = 0;
+  } else {
+    motion_time += dt;
+  }
+}
+
+float average_motion_data() {
+  float average_value = 0.0;
+  int queue_size = motion_data.size();
+
+  std::queue<unsigned char> data_copy = motion_data;
+  while (!data_copy.empty()) {
+    average_value += (float)data_copy.front() / queue_size;
+    data_copy.pop();
+  }
+
+  return(average_value);
+}
+
+void enter_deep_sleep() {
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause(); 
+  Serial.println("Previous wakeup reason: " + String(wakeup_reason)); 
+  esp_sleep_enable_ext0_wakeup(PIR_PIN, HIGH); 
+  Serial.println("GPIO wakeup enabled"); 
+  delay(100); 
+  Serial.println("Entering deep sleep... Move in front of PIR to wake up."); 
+  esp_deep_sleep_start();
+}
