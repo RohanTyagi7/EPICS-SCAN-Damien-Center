@@ -42,26 +42,31 @@
 #define WAITING 1
 #define WATCHING 2
 
+#define DISTANCE_SAMPLE_DELAY 1000  // time between distance samples (ms)
+
 // currently very high for testing purposes
 #define MOTION_TIMEOUT 400000  // motion timeout threshold (ms)
 
 #define ROOM_EMPTY_TIMEOUT 5000  // room empty timeout (ms)
 
-#define MAX_DATA_POINTS 3  // amount of values stored in motion data queue
 #define MOTION_VAL_THRESHOLD 70  // threshold for average motion value over sample interval
+
+#define MAX_DISTANCE_DATA_POINTS 5  // amount of values stored in the distance data queue
 
 #define LOOP_DEBUG
 
-unsigned long power_on_time;
-unsigned long loop_start_time;
-unsigned long loop_end_time;
-unsigned long dt;
+unsigned long power_on_time;  // time of power-on
+unsigned long loop_start_time;  // time when loop started
+unsigned long loop_end_time;  // time when loop ended
+unsigned long dt;  // time that loop took to execute
 
-unsigned long room_empty_time;
-unsigned long motion_time;
+unsigned long distance_measurement_timer = 0;  // timer to control distance measurements
+
+unsigned long room_empty_time;  // amount of time room has been empty 
+unsigned long motion_time;  // amount of time since motion occured
 unsigned short system_state = WAITING;
 
-std::queue<unsigned char> motion_data;
+std::queue<unsigned long> distance_data;
 
 void init_presence_sensor() {
   digitalWrite(MOSFET_PIN, HIGH);
@@ -174,19 +179,20 @@ void loop() {
     }
     Serial.print(" | ");
 
+    Serial.print(calc_estimated_distance());
+    Serial.print(" | ");
+    
     // print instantaneous motion value
     sensor.presenceDetected() && sensor.movingTargetDetected() 
-      ? Serial.print(sensor.movingTargetSignal())
-      : Serial.print("0");
-    
-    Serial.print(" | ");
-    Serial.println(average_motion_data());
-
+      ? Serial.println(sensor.movingTargetSignal())
+      : Serial.println("0");
   #endif
 
   loop_end_time = millis();
   dt = loop_end_time - loop_start_time;
   loop_start_time = loop_end_time;
+
+  distance_measurement_timer += dt;
 }
 
 void power_off_hp() {
@@ -234,42 +240,50 @@ void update_values(unsigned long dt) {
   unsigned char motion_val = 0;
 
   while (sensor.check() != MyLD2410::Response::DATA) {
-    // no new values to update
+    // wait for new values to update
   }
 
   if (!sensor.presenceDetected()) {
     room_empty_time += dt;
   } else if (sensor.presenceDetected() && sensor.movingTargetDetected()) {
     motion_val = sensor.movingTargetSignal();
-    room_empty_time = 0;
+    
   } else {
     motion_val = 0;
     room_empty_time = 0;
   }
 
-  if (motion_data.size() >= MAX_DATA_POINTS) {
-    motion_data.pop();
-  }
-  motion_data.push(motion_val);
+  if (sensor.presenceDetected()) {
+    room_empty_time = 0;
 
-  if (average_motion_data() > MOTION_VAL_THRESHOLD) {
+    if (distance_measurement_timer > DISTANCE_SAMPLE_DELAY) {
+      // add new value to distance data
+      if (distance_data.size() >= MAX_DISTANCE_DATA_POINTS) {
+        distance_data.pop();
+      }
+      distance_data.push(sensor.detectedDistance());
+    }
+  }
+
+  if (motion_val > MOTION_VAL_THRESHOLD) {
     motion_time = 0;
   } else {
     motion_time += dt;
   }
 }
 
-float average_motion_data() {
-  float average_value = 0.0;
-  int queue_size = motion_data.size();
+unsigned long calc_estimated_distance() {
+  unsigned long min_distance_value = -1;
 
-  std::queue<unsigned char> data_copy = motion_data;
+  std::queue<unsigned long> data_copy = distance_data;
   while (!data_copy.empty()) {
-    average_value += (float)data_copy.front() / queue_size;
+    if (data_copy.front() < min_distance_value || min_distance_value == -1) {
+      min_distance_value = data_copy.front();
+    }
     data_copy.pop();
   }
 
-  return(average_value);
+  return(min_distance_value);
 }
 
 void enter_deep_sleep() {
