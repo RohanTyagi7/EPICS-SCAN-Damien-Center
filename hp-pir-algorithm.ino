@@ -38,6 +38,7 @@
 #define PIR_PIN GPIO_NUM_14
 #define LED_PIN GPIO_NUM_13
 #define MOSFET_PIN GPIO_NUM_27
+#define BUTTON_PIN GPIO_NUM_21
 
 #define WAITING 1
 #define WATCHING 2
@@ -49,7 +50,7 @@
 
 #define ROOM_EMPTY_TIMEOUT 5000  // room empty timeout (ms)
 
-#define MOTION_VAL_THRESHOLD 70  // threshold for average motion value over sample interval
+#define MOTION_VAL_THRESHOLD 85  // threshold for average motion value over sample interval
 
 #define MAX_DISTANCE_DATA_POINTS 5  // amount of values stored in the distance data queue
 
@@ -105,6 +106,8 @@ void setup() {
   Serial.println(__FILE__); 
 
   init_presence_sensor();
+
+  distance_data.push(0);  // initialize distance array with a zero value
 
   // TESTING PURPOSES
   Serial.println("Collecting data in 5...");
@@ -184,7 +187,14 @@ void loop() {
     
     // print instantaneous motion value
     sensor.presenceDetected() && sensor.movingTargetDetected() 
-      ? Serial.println(sensor.movingTargetSignal())
+      ? Serial.print(sensor.movingTargetSignal())
+      : Serial.print("0");
+
+    Serial.print(" | ");
+
+    // print scaled motion value
+    sensor.presenceDetected() && sensor.movingTargetDetected() 
+      ? Serial.println(scale_motion(sensor.movingTargetSignal(), calc_estimated_distance()))
       : Serial.println("0");
   #endif
 
@@ -220,9 +230,6 @@ void power_on_hp() {
 }
 
 void trigger_emergency() {
-  // trigger emergency
-  // NOT YET IMPLEMENTED
-
   digitalWrite(LED_PIN, HIGH);
 
   Serial.print("Emergency triggered at ");
@@ -247,7 +254,7 @@ void update_values(unsigned long dt) {
     room_empty_time += dt;
   } else if (sensor.presenceDetected() && sensor.movingTargetDetected()) {
     motion_val = sensor.movingTargetSignal();
-    
+    motion_val = scale_motion(motion_val, calc_estimated_distance());
   } else {
     motion_val = 0;
     room_empty_time = 0;
@@ -257,6 +264,7 @@ void update_values(unsigned long dt) {
     room_empty_time = 0;
 
     if (distance_measurement_timer > DISTANCE_SAMPLE_DELAY) {
+      distance_measurement_timer = 0;
       // add new value to distance data
       if (distance_data.size() >= MAX_DISTANCE_DATA_POINTS) {
         distance_data.pop();
@@ -294,4 +302,24 @@ void enter_deep_sleep() {
   delay(100); 
   Serial.println("Entering deep sleep... Move in front of PIR to wake up."); 
   esp_deep_sleep_start();
+}
+
+unsigned char scale_motion(unsigned int motion_val, unsigned long estimated_distance) {
+  /* estimated_distance: distance from person to sensor in centimeters */
+  estimated_distance *= 0.0328;  // convert from cm to feet
+  float scale;
+  if (estimated_distance < 4) {
+    scale = 1.0;
+  } else if (4 <= estimated_distance && estimated_distance < 7) {
+    scale = 1.0/3 * (estimated_distance - 4) + 1;
+  } else {
+    scale = 1.0/2 * (estimated_distance - 7) + 2;
+  }
+
+  motion_val *= scale;
+  if (motion_val > 100) {
+    motion_val = 100;
+  }
+
+  return((unsigned char)motion_val);
 }
