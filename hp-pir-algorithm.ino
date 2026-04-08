@@ -38,21 +38,20 @@
 #define PIR_PIN GPIO_NUM_14
 #define LED_PIN GPIO_NUM_13
 #define MOSFET_PIN GPIO_NUM_27
-#define BUTTON_PIN GPIO_NUM_21
+#define BUTTON_PIN GPIO_NUM_18
 
 #define WAITING 1
 #define WATCHING 2
 
 #define DISTANCE_SAMPLE_DELAY 1000  // time between distance samples (ms)
 
-// currently very high for testing purposes
-#define MOTION_TIMEOUT 400000  // motion timeout threshold (ms)
+#define MOTION_TIMEOUT 90000  // motion timeout threshold (ms)
 
 #define ROOM_EMPTY_TIMEOUT 5000  // room empty timeout (ms)
 
-#define MOTION_VAL_THRESHOLD 85  // threshold for average motion value over sample interval
+#define MOTION_VAL_THRESHOLD 100  // threshold for average motion value over sample interval
 
-#define MAX_DISTANCE_DATA_POINTS 5  // amount of values stored in the distance data queue
+#define MAX_DISTANCE_DATA_POINTS 10  // amount of values stored in the distance data queue
 
 #define LOOP_DEBUG
 
@@ -66,6 +65,8 @@ unsigned long distance_measurement_timer = 0;  // timer to control distance meas
 unsigned long room_empty_time;  // amount of time room has been empty 
 unsigned long motion_time;  // amount of time since motion occured
 unsigned short system_state = WAITING;
+
+bool is_emergency_occurring = false;
 
 std::queue<unsigned long> distance_data;
 
@@ -98,8 +99,13 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
 
   pinMode(PIR_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
   pinMode(MOSFET_PIN, OUTPUT);
+
+  // for testing purposes to power button
+  pinMode(GPIO_NUM_21, OUTPUT);
+  digitalWrite(GPIO_NUM_21, HIGH);
 
   digitalWrite(LED_PIN, LOW);
 
@@ -125,6 +131,40 @@ void setup() {
 }
 
 void loop() {
+  if (digitalRead(BUTTON_PIN) == HIGH) {
+    is_emergency_occurring = true;
+  }
+  
+  if (is_emergency_occurring) {
+    digitalWrite(LED_PIN, HIGH);
+
+    Serial.print("Emergency triggered at ");
+    Serial.print(millis() - power_on_time);
+    Serial.println(" ms.");
+
+    // cancel emergency
+    while (digitalRead(BUTTON_PIN) == HIGH) {
+      // if button already pressed, let it go low
+    }
+
+    while (digitalRead(BUTTON_PIN) == LOW) {
+      // wait for button to go high (manual emergency cancellation)
+    }
+
+    delay(50); // debounce, give time 
+
+    // cancel emergency
+    while (digitalRead(BUTTON_PIN) == HIGH) {
+      // wait until button is let go
+    }
+
+    digitalWrite(LED_PIN, LOW);
+
+    is_emergency_occurring = false;
+    room_empty_time = 0;
+    motion_time = 0;
+  }
+
   if (system_state == WAITING) {
     if (digitalRead(PIR_PIN) == 1) {
       system_state = WATCHING;
@@ -148,7 +188,7 @@ void loop() {
     update_values(dt);
 
     if (motion_time > MOTION_TIMEOUT) {
-      trigger_emergency();
+      is_emergency_occurring = true;
     }
   }
 
@@ -229,25 +269,16 @@ void power_on_hp() {
   Serial.println(" ms.");
 }
 
-void trigger_emergency() {
-  digitalWrite(LED_PIN, HIGH);
-
-  Serial.print("Emergency triggered at ");
-  Serial.print(millis() - power_on_time);
-  Serial.println(" ms.");
-
-  // cancel emergency
-  delay(20000);
-  digitalWrite(LED_PIN, LOW);
-  room_empty_time = 0;
-  motion_time = 0;
-}
-
 void update_values(unsigned long dt) {
   unsigned char motion_val = 0;
 
   while (sensor.check() != MyLD2410::Response::DATA) {
     // wait for new values to update
+
+    // keep checking for emergency button even while waiting
+    if (digitalRead(BUTTON_PIN) == HIGH) {
+      is_emergency_occurring = true;
+    }
   }
 
   if (!sensor.presenceDetected()) {
@@ -273,7 +304,7 @@ void update_values(unsigned long dt) {
     }
   }
 
-  if (motion_val > MOTION_VAL_THRESHOLD) {
+  if (motion_val >= MOTION_VAL_THRESHOLD) {
     motion_time = 0;
   } else {
     motion_time += dt;
@@ -312,8 +343,10 @@ unsigned char scale_motion(unsigned int motion_val, unsigned long estimated_dist
     scale = 1.0;
   } else if (4 <= estimated_distance && estimated_distance < 7) {
     scale = 1.0/3 * (estimated_distance - 4) + 1;
+  } else if (7 <= estimated_distance && estimated_distance < 9) {
+    scale = 1.0/4 * (estimated_distance - 7) + 2;
   } else {
-    scale = 1.0/2 * (estimated_distance - 7) + 2;
+    scale = 2.5;
   }
 
   motion_val *= scale;
