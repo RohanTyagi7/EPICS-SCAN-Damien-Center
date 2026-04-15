@@ -166,7 +166,7 @@ void loop() {
   }
 
   if (system_state == WAITING) {
-    if (digitalRead(PIR_PIN) == 1) {
+    if (digitalRead(PIR_PIN) == HIGH) {
       system_state = WATCHING;
       room_empty_time = 0;
       motion_time = 0;
